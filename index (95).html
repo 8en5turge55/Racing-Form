@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Racing Form: Big-Margin Winners</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1ec;--ink:#14231c;--mut:#5d6b63;--card:#fff;--line:#d5dcd3;--green:#17382b;--acc:#2b4fd8;--hi:#e8eeff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 'Schibsted Grotesk',system-ui,sans-serif;font-variant-numeric:tabular-nums}
+header{background:var(--green);color:#f1f5ef;padding:18px 20px 0}
+h1{margin:0 0 4px;font-size:22px;font-weight:800;letter-spacing:-.01em}
+header p{margin:0 0 14px;color:#b9c8bf;max-width:70ch}
+nav{display:flex;gap:4px}
+nav button{background:none;border:0;color:#b9c8bf;padding:10px 16px;font:600 15px inherit;font-family:inherit;cursor:pointer;border-radius:8px 8px 0 0}
+nav button[aria-selected=true]{background:var(--bg);color:var(--ink)}
+main{max-width:1100px;margin:0 auto;padding:16px 20px 60px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:16px}
+.ctl{display:flex;flex-wrap:wrap;gap:14px 18px;align-items:end}
+label{display:flex;flex-direction:column;font-size:12.5px;color:var(--mut);gap:4px}
+label.row{flex-direction:row;align-items:center;gap:6px}
+input,select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+#worker{min-width:290px}
+.go{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 18px;font:600 15px inherit;font-family:inherit;cursor:pointer}
+.go:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+#status{margin-top:10px;color:var(--mut);font-size:13.5px;min-height:1.3em}
+#status.err{color:#b3261e}
+.bar{height:4px;background:var(--line);border-radius:2px;margin-top:8px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .3s}
+table{width:100%;border-collapse:collapse}
+th{font-size:12.5px;font-weight:600;color:var(--mut);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid #edf0eb;vertical-align:top}
+tr:last-child td{border-bottom:0}
+.horse{font-weight:800}
+.sub{color:var(--mut);font-size:13px}
+.odds{font-weight:800;color:var(--acc)}
+.tbl{overflow-x:auto}
+.race h3{margin:0;font-size:16px}
+.race header{background:none;color:inherit;padding:0 0 8px}
+.race tr.bb td{background:var(--hi)}
+.race tr.bb .horse::before{content:"\2605  ";color:var(--acc)}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:99px;background:#e6ebe4;margin-left:6px}
+.empty{padding:30px 10px;text-align:center;color:var(--mut)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Racing Form: Big-Margin Winners</h1>
+  <p>UK racing. Flags runners that won by a big margin in their last 8 starts: more than 8 lengths over jumps, more than 3 lengths on the flat.</p>
+  <nav role="tablist">
+    <button role="tab" aria-selected="true" data-t="bets">Best Bets</button>
+    <button role="tab" aria-selected="false" data-t="cards">Race Cards</button>
+  </nav>
+</header>
+<main>
+  <div class="panel">
+    <div class="ctl">
+      <label>Worker URL<input id="worker" placeholder="https://racing-proxy.yourname.workers.dev"></label>
+      <label>Look ahead
+        <select id="days"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option selected>7</option></select>
+      </label>
+      <label>Testing: pretend today is<input type="date" id="asof"></label>
+      <label class="row"><input type="checkbox" id="same"> Only count wins in the same code as the race</label>
+      <label class="row"><input type="checkbox" id="pre" checked> Skip horses with no win in their form string (faster)</label>
+      <button class="go" id="scan">Scan races</button>
+    </div>
+    <div id="status"></div><div class="bar"><i id="prog"></i></div>
+  </div>
+  <section id="bets"></section>
+  <section id="cards" class="hide"></section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const LIM={jumps:8,flat:3}, KEEP=8, TTL=12*3600e3;
+const store={get:k=>{try{return JSON.parse(localStorage.getItem(k))}catch{return null}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}}};
+let bets=[],races=[];
+
+// settings
+const cfg=store.get('hr:cfg')||{};
+$('worker').value=cfg.worker||''; if(cfg.days)$('days').value=cfg.days;
+if(cfg.same)$('same').checked=true; if(cfg.pre===false)$('pre').checked=false;
+function saveCfg(){store.set('hr:cfg',{worker:$('worker').value.trim().replace(/\/$/,''),days:$('days').value,same:$('same').checked,pre:$('pre').checked})}
+
+// tabs
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.setAttribute('aria-selected',x===b));
+  $('bets').classList.toggle('hide',b.dataset.t!=='bets');$('cards').classList.toggle('hide',b.dataset.t!=='cards');});
+
+// throttled fetch (API limit: 2 requests/second)
+let last=0;
+async function api(path){
+  const wait=Math.max(0,last+550-Date.now());last=Date.now()+wait;
+  if(wait)await new Promise(r=>setTimeout(r,wait));
+  const r=await fetch($('worker').value.trim().replace(/\/$/,'')+path);
+  if(!r.ok)throw new Error(`${r.status} on ${path.split('?')[0]}`+(r.status===401||r.status===403?' (check your Racing API plan covers this endpoint)':''));
+  return r.json();
+}
+const status=(t,e)=>{$('status').textContent=t;$('status').className=e?'err':''};
+const prog=p=>$('prog').style.width=Math.round(p*100)+'%';
+
+// helpers
+const W={nse:.05,shd:.1,sht:.1,hd:.2,snk:.25,nk:.3,dist:30,dht:0};
+function lens(s){
+  if(s==null||s==='')return null;if(typeof s==='number')return s;
+  s=String(s).trim().toLowerCase().replace(/[¼½¾]/g,c=>({'¼':' 1/4','½':' 1/2','¾':' 3/4'}[c]));
+  if(s in W)return W[s];
+  let t=0;for(const p of s.split(/\s+/)){
+    if(/^\d+\/\d+$/.test(p)){const[a,b]=p.split('/');t+=a/b}else if(/^\d+(\.\d+)?$/.test(p))t+=+p;else return null}
+  return t;
+}
+const code=t=>/chase|hurdle/i.test(t||'')?'jumps':'flat'; // NH Flat (bumpers) counts as flat
+const addDays=(d,n)=>{const x=new Date(d+'T00:00:00Z');x.setUTCDate(x.getUTCDate()+n);return x.toISOString().slice(0,10)};
+const today=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Europe/London'});
+const fmtDate=d=>new Date(d+'T00:00:00Z').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'});
+const dayLabel=d=>new Date(d+'T00:00:00Z').toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',timeZone:'UTC'});
+
+// reduce one past race to {d,c,w,m,id}; m = winning margin in lengths (null if unknown)
+function proc(race,hid){
+  const rs=race.runners||[],me=rs.find(r=>String(r.horse_id)===String(hid));
+  const rec={d:(race.date||'').slice(0,10),c:code(race.type||race.race_type),id:race.race_id,w:false,m:null};
+  if(!me||String(me.position)!=='1')return rec;
+  rec.w=true;
+  const two=rs.find(r=>String(r.position)==='2');
+  if(two)rec.m=lens(two.ovr_btn??two.btn);
+  else if(rs.filter(r=>String(r.position)==='1').length>1)rec.m=0; // dead heat
+  return rec;
+}
+async function horseRuns(hid){
+  const k='hr:h:'+hid,c=store.get(k);
+  if(c&&Date.now()-c.t<TTL)return c.runs;
+  const d=await api(`/v1/horses/${hid}/results?limit=12`);
+  const runs=(d.results||d.races||[]).map(r=>proc(r,hid)).filter(r=>r.d).sort((a,b)=>b.d.localeCompare(a.d));
+  for(const r of runs.slice(0,KEEP)) if(r.w&&r.m==null&&r.id){ // margin missing: look up the full result
+    try{const f=await api(`/v1/results/${r.id}`);r.m=proc(f.race||f,hid).m}catch{}}
+  store.set(k,{t:Date.now(),runs:runs.slice(0,KEEP+4)});
+  return runs;
+}
+const formWon=f=>/1/.test((String(f||'').replace(/[^0-9A-Za-z]/g,'')).slice(-KEEP));
+function bestPrice(odds){
+  let b=null;for(const o of odds||[]){const dec=+o.decimal;if(dec&&(!b||dec>b.dec))b={dec,txt:o.fractional||dec.toFixed(2),bk:o.bookmaker}}return b;
+}
+
+async function scan(){
+  saveCfg();
+  if(!$('worker').value.trim())return status('Enter your Worker URL first.',1);
+  $('scan').disabled=true;bets=[];races=[];prog(0);
+  const asOf=$('asof').value||today(),n=+$('days').value,same=$('same').checked,pre=$('pre').checked;
+  try{
+    // 1. racecards, one request per day
+    const all=[];
+    for(let i=0;i<=n;i++){
+      const day=addDays(asOf,i);status(`Loading racecards for ${dayLabel(day)}…`);
+      for(let skip=0;;){
+        const d=await api(`/v1/racecards/pro?date=${day}&region_codes=gb&limit=100&skip=${skip}`);
+        const rc=d.racecards||[];all.push(...rc.map(r=>({...r,date:r.date||day})));
+        skip+=rc.length;if(!rc.length||skip>=(d.total||0))break;
+      }
+    }
+    if(!all.length){status('No racecards found for that period.');return render()}
+    // 2. which horses need their history checked
+    const ids=new Map();
+    for(const r of all)for(const u of r.runners||[])if(u.horse_id&&(!pre||formWon(u.form)))ids.set(u.horse_id,u.horse);
+    const list=[...ids.keys()],hist={};
+    let done=0,cached=0;
+    for(const id of list){
+      const c=store.get('hr:h:'+id);if(c&&Date.now()-c.t<TTL)cached++;
+      status(`Checking form: ${++done} of ${list.length} horses (${cached} from cache)…`);prog(done/list.length);
+      try{hist[id]=await horseRuns(id)}catch(e){if(/^40[13]/.test(e.message))throw e}
+    }
+    // 3. apply criteria
+    for(const r of all){
+      const cd=code(r.type),lim=LIM[cd],rr=[];
+      for(const u of r.runners||[]){
+        const runs=(hist[u.horse_id]||[]).filter(x=>x.d<asOf).slice(0,KEEP);
+        const hits=runs.filter(x=>x.w&&x.m!=null&&x.m>(same?LIM[x.c]:lim)&&(!same||x.c===cd));
+        if(hits.length){const bp=bestPrice(u.odds);bets.push({r,u,hit:hits[0],n:hits.length,bp,asOf});rr.push(u.horse_id)}
+      }
+      if(rr.length)races.push({r,bb:new Set(rr)});
+    }
+    bets.sort((a,b)=>b.hit.d.localeCompare(a.hit.d)||(a.r.date+a.r.off_time).localeCompare(b.r.date+b.r.off_time));
+    races.sort((a,b)=>(a.r.date+(a.r.off_dt||a.r.off_time)).localeCompare(b.r.date+(b.r.off_dt||b.r.off_time)));
+    status(`${bets.length} best bet${bets.length===1?'':'s'} across ${races.length} race${races.length===1?'':'s'}, ${all.length} races scanned (${asOf} to ${addDays(asOf,n)}).`);
+    prog(1);render();
+  }catch(e){status('Scan stopped: '+e.message,1)}finally{$('scan').disabled=false}
+}
+
+function time(r){return esc(r.off_time||(r.off_dt||'').slice(11,16))}
+function render(){
+  $('bets').innerHTML=bets.length?`<div class="panel tbl"><table><thead><tr><th>Horse</th><th>Race</th><th>Odds</th><th>Big win</th></tr></thead><tbody>`+
+    bets.map(b=>{const l=lens(b.hit.m),ago=Math.round((new Date(b.asOf)-new Date(b.hit.d))/864e5);
+    return `<tr><td><div class="horse">${esc(b.u.horse)}</div><div class="sub">${esc(b.u.jockey||'')}${b.u.trainer?' / '+esc(b.u.trainer):''}</div></td>
+    <td><div>${esc(b.r.course)} ${time(b.r)}<span class="pill">${code(b.r.type)==='jumps'?'Jumps':'Flat'}</span></div><div class="sub">${esc(dayLabel(b.r.date))} · ${esc(b.r.race_name||'')}</div></td>
+    <td>${b.bp?`<span class="odds">${esc(b.bp.txt)}</span><div class="sub">${esc(b.bp.bk||'')}</div>`:'<span class="sub">Not yet priced</span>'}</td>
+    <td>Won by ${+lens(b.hit.m).toFixed(2)} lengths<div class="sub">${fmtDate(b.hit.d)} (${ago} days before)${b.n>1?` · ${b.n} qualifying wins`:''}</div></td></tr>`}).join('')+`</tbody></table></div>`
+    :`<div class="panel empty">${$('prog').style.width==='100%'?'No horses meet the criteria in this window.':'Press Scan races to find best bets.'}</div>`;
+  $('cards').innerHTML=races.length?races.map(({r,bb})=>`<div class="panel race tbl"><header><h3>${esc(r.course)} ${time(r)}<span class="pill">${esc(r.type||'')}</span></h3>
+    <div class="sub">${esc(dayLabel(r.date))} · ${esc(r.race_name||'')} · ${esc(r.distance_f||r.distance||'')}${r.going?' · '+esc(r.going):''}${r.race_class?' · '+esc(r.race_class):''}</div></header>
+    <table><thead><tr><th>No.</th><th>Horse</th><th>Form</th><th>Jockey / Trainer</th><th>Age</th><th>Wgt</th><th>Odds</th></tr></thead><tbody>`+
+    (r.runners||[]).map(u=>{const bp=bestPrice(u.odds);return `<tr class="${bb.has(u.horse_id)?'bb':''}"><td>${esc(u.number)}</td><td class="horse">${esc(u.horse)}</td><td>${esc(u.form)}</td>
+    <td>${esc(u.jockey)}<div class="sub">${esc(u.trainer)}</div></td><td>${esc(u.age)}</td><td>${esc(u.lbs)}</td><td class="odds">${bp?esc(bp.txt):''}</td></tr>`}).join('')+`</tbody></table></div>`).join('')
+    :`<div class="panel empty">Race cards appear here for races that contain a best bet. Starred rows are the best bets.</div>`;
+}
+$('scan').onclick=scan;render();
+</script>
+</body>
+</html>
